@@ -97,32 +97,21 @@ class Text2ImUNet(UNetModel):
             return self.cache
         # init self_init
         # print(tokens)
-        # xf_in = self.token_embedding(tokens.long())
-        # torch.save(xf_in,'/home/changsheng/glide-text2im/ck/xf_in_tensor.pt')
-        xf_in = self_init
-        # print(xf_in)
-        # print(xf_in.shape)
-        # print(xf_in[:1,5:10,:])
-        # print("self_init:", self_init.requires_grad)
+        xf_in = self.token_embedding(tokens.long())
         # xf_in = self_init
         
-        # xf_in = xf_in + self.positional_embedding[None]
-        # print(xf_in.shape)
+        xf_in = xf_in + self.positional_embedding[None]
         # print("xf_in:", xf_in.requires_grad)
         
         if self.xf_padding:
             assert mask is not None
             xf_in = th.where(mask[..., None], xf_in, self.padding_embedding[None])
-        
-        # print("xf_in_1:", xf_in.requires_grad)
         xf_out = self.transformer(xf_in.to(self.dtype))
-        # print("xf_out_0:", xf_out.requires_grad)
         if self.final_ln is not None:
             xf_out = self.final_ln(xf_out)
         xf_proj = self.transformer_proj(xf_out[:, -1])
         xf_out = xf_out.permute(0, 2, 1)  # NLC -> NCL
-        # print("xf_proj:", xf_proj.requires_grad)
-        # print("xf_out:", xf_out.requires_grad)
+
         outputs = dict(xf_proj=xf_proj, xf_out=xf_out)
 
         if self.cache_text_emb:
@@ -140,7 +129,6 @@ class Text2ImUNet(UNetModel):
     def forward(self, x, timesteps, tokens=None, mask=None, self_init = None,self_emb = None):
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-        
         if self.xf_width:
             
             text_outputs = self.get_text_emb(tokens, mask,self_init)
@@ -151,12 +139,8 @@ class Text2ImUNet(UNetModel):
         else:
             xf_out = None
         
-        # emb = self_emb
-        
+        emb = self_emb
         # print("emb:", emb.requires_grad)
-        # file_path = '/home/changsheng/glide-text2im/ck/cogi_emb.pt'
-        # torch.save(emb, file_path)
-        
         h = x.type(self.dtype)
         # h.requires_grad_(True)
         
