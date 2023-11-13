@@ -8,7 +8,7 @@ from glide_text2im.model_creation import (
     model_and_diffusion_defaults,
     model_and_diffusion_defaults_upsampler
 )
-
+from glide_text2im.xf import LayerNorm, Transformer, convert_module_to_f16
 from glide_text2im.soft_embedding import SoftEmbedding
 import torch.nn as nn
 import numpy as np
@@ -23,8 +23,9 @@ device = th.device('cpu' if not has_cuda else 'cuda:6')
 
 # Create base model.
 options = model_and_diffusion_defaults()
+
 options['use_fp16'] = has_cuda
-options['timestep_respacing'] = '5' # use 100 diffusion steps for fast sampling
+options['timestep_respacing'] = '100' # use 100 diffusion steps for fast sampling
 model, diffusion = create_model_and_diffusion(**options)
 model.eval()
 if has_cuda:
@@ -87,7 +88,7 @@ def l2_loss(tensor1, tensor2):
     return F.mse_loss(tensor1, tensor2)
 
 def prompt_token(options,device,model):
-    prompt = "an oil painting of a corgi"
+    prompt = "an oil painting of a dog"
     batch_size = 1
     guidance_scale = 3.0
     upsample_temp = 0.997
@@ -95,7 +96,7 @@ def prompt_token(options,device,model):
     tokens, mask = model.tokenizer.padded_tokens_and_mask(
         tokens, options['text_ctx']
     )
-    print(mask)
+
     # Create the classifier-free guidance tokens (empty)
     full_batch_size = batch_size * 2
     uncond_tokens, uncond_mask = model.tokenizer.padded_tokens_and_mask(
@@ -215,24 +216,85 @@ def compare_parameters(snapshot1, snapshot2):
             return True
     return False
 
+def get_text_emb(tokens, mask,device,emb = None):
+        assert tokens is not None
+        xf_layers = 16
+        xf_heads = 8
+        model_channels = 192
+        text_ctx = 128
+        xf_width = 512
+        xf_padding = True
+        transformer = Transformer(
+                text_ctx,
+                xf_width,
+                xf_layers,
+                xf_heads,
+            ).to(device)
+        token_embedding = nn.Embedding(50257, 512).to(device)
+        padding_embedding = nn.Parameter(
+                    th.empty(text_ctx, xf_width, dtype=th.float32)
+                ).to(device)
+        
+        final_ln = LayerNorm(xf_width).to(device)
+        
+        if emb is None:
+            xf_in = token_embedding(tokens.long()).to(device)
+        else:
+            xf_in = emb
+        
+        transformer_proj = nn.Linear(xf_width, model_channels * 4).to(device)
+        assert mask is not None
+        xf_in = th.where(mask[..., None], xf_in, padding_embedding[None])
+        
+        xf_out = transformer(xf_in)
+        
+        xf_out = final_ln(xf_out)
+        xf_proj = transformer_proj(xf_out[:, -1])
+        xf_out = xf_out.permute(0, 2, 1)  # NLC -> NCL
+        xf_proj = xf_proj.to(torch.float16)
+        xf_out = xf_out.to(torch.float16)
+        outputs = dict(xf_proj=xf_proj, xf_out=xf_out)
+        
+        return outputs
 
 
+def get_emb(tokens, mask,device,emb = None):
+        assert tokens is not None
+        xf_layers = 16
+        xf_heads = 8
+        model_channels = 192
+        text_ctx = 128
+        xf_width = 512
+        xf_padding = True
+        transformer = Transformer(
+                text_ctx,
+                xf_width,
+                xf_layers,
+                xf_heads,
+            ).to(device)
+        token_embedding = nn.Embedding(50257, 512).to(device)
+        padding_embedding = nn.Parameter(
+                    th.empty(text_ctx, xf_width, dtype=th.float32)
+                ).to(device)
+        
+        final_ln = LayerNorm(xf_width).to(device)
+        emb = token_embedding(tokens.long()).to(device)
+        return emb
 
 ######################## initialize the label ################
 
 label = load_image_as_tensor('/home/changsheng/glide-text2im/output_image_bomb.png')
 label = label.to(device)
 
-
 ######################### initialize the tokens ################
 # Sampling parameters
 
 tokens,masks,full_batch_size  = prompt_token(options,device,model)
+# outputs = get_text_emb(tokens, masks,device)
 
 # tokens size: torch.Size([2, 128, 512])
 
 ################### initialize the embedding ###############
-
 
 # embeding size : torch.Size([2, 128, 512])
 ####################### Train process #############
@@ -243,119 +305,134 @@ self_emb = torch.load('/home/changsheng/glide-text2im/ck/xf_in_tensor_long.pt')
 self_emb = self_emb.to(device)
 self_emb.requires_grad_(True)
 
+'''
+self_emb = get_emb(tokens, masks ,device)
 
-optimizer = SGD([self_emb.requires_grad_(True)], lr=1)
+self_emb = self_emb.detach().clone()
+
+self_emb = self_emb.to(device)
+self_emb = self_emb.requires_grad_(True)
+'''
+if self_emb.is_leaf:
+    print("The tensor is a leaf node.")
+else:
+    print("The tensor is not a leaf node.")
+
+optimizer = SGD([self_emb.requires_grad_(True)], lr=0.1)
 # Number of optimization steps
 n_steps = 10000
 criterion = nn.MSELoss()
 
-
-param_snapshots = []
-for step in range(n_steps):
-    optimizer.zero_grad()  # Reset gradients to zero
-    # ------- model start ----
-    guidance_scale = 3.0
-    upsample_temp = 0.997
-    print(self_emb[:1,5:10,:])
-    # print("embeding:", self_emb.requires_grad)
-    batch_size = 1
-    model_kwargs = dict(
-        tokens=tokens ,
-        mask=masks,
-        # Randomly initialize an embedding with values in the range 0 to 0.5
-        # with the shape [2, 128, 512]
-        self_init = self_emb,
-        self_emb = None,
-    )
-    
-    # model.del_cache()
-    samples = diffusion.p_sample_loop(
-        model_fn,
-        (full_batch_size, 3, options["image_size"], options["image_size"]),
-        device=device,
-        clip_denoised=True,
-        progress=True,
-        model_kwargs=model_kwargs,
-        cond_fn=None,
-    )[:batch_size]
-    # model.del_cache()
-    path = 'output_image_64.png'
-    show_images(samples,path)
-    samples.retain_grad()
-    print('samples',samples.grad)
-    
-    ##### finish base model --> 64-256 up model ####
-    
-    prompt = "an oil painting of a corgi"
-    tokens = model_up.tokenizer.encode(prompt)
-    tokens, mask = model_up.tokenizer.padded_tokens_and_mask(
-        tokens, options_up['text_ctx']
-    )
-    
-    # Create the model conditioning dict.
-    model_kwargs = dict(
-        # Low-res image to upsample.
-        low_res=((samples+1)*127.5).round()/127.5 - 1,
-        tokens=th.tensor(
-            [tokens] * batch_size, device=device
-        ),
-        mask=th.tensor(
-            [mask] * batch_size,
-            dtype=th.bool,
+with torch.no_grad():
+    param_snapshots = []
+    for step in range(n_steps):
+        optimizer.zero_grad()  # Reset gradients to zero
+        # ------- model start ----
+        
+        guidance_scale = 3.0
+        upsample_temp = 0.997
+        
+        # print("embeding:", self_emb.requires_grad)
+        batch_size = 1
+        model_kwargs = dict(
+            tokens=tokens ,
+            mask=masks,
+            # Randomly initialize an embedding with values in the range 0 to 0.5
+            # with the shape [2, 128, 512]
+            self_init = self_emb,
+            
+        )
+        
+        model.del_cache()
+        samples = diffusion.p_sample_loop(
+            model_fn,
+            (full_batch_size, 3, options["image_size"], options["image_size"]),
             device=device,
-        ),
-        self_init = (self_emb)[:1],
-        self_emb = None,
-    )
-    # print("embeding:", embeding.requires_grad)
-    # model_up.del_cache()
-    up_shape = (batch_size, 3, options_up["image_size"], options_up["image_size"])
-    up_samples = diffusion_up.ddim_sample_loop(
-        model_up,
-        up_shape,
-        noise=th.randn(up_shape, device=device) * upsample_temp,
-        device=device,
-        clip_denoised=True,
-        progress=True,
-        model_kwargs=model_kwargs,
-        cond_fn=None,
-    )[:batch_size]
-    # model_up.del_cache()
-    up_samples.retain_grad()
-    print('up_samples',up_samples.grad)
-    
-    print("up_samples:", up_samples.requires_grad)
-    
-    path = 'output_image_256.png'
-    show_images(up_samples,path)
-    
-    # up_samples size :  torch.Size([1, 3, 256, 256])
-    # print("up_samples:", up_samples.requires_grad)
-    
-    ################ Clip Model ##############
-    # torch.Size([1, 3, 224, 224])
-    
-    up_samples_224 = F.interpolate(up_samples, size=(224, 224))
-    label_224 = F.interpolate(label, size=(224, 224))
+            clip_denoised=True,
+            progress=True,
+            model_kwargs=model_kwargs,
+            cond_fn=None,
+        )[:batch_size]
+        model.del_cache()
+        path = 'output_image_64.png'
+        show_images(samples,path)
+        samples.retain_grad()
+        print('samples',samples.grad)
+        
+        print("samples:", samples.requires_grad)
+        
+        ##### finish base model --> 64-256 up model ####
+        
+        prompt = "an oil painting of a corgi"
+        tokens = model_up.tokenizer.encode(prompt)
+        tokens, mask = model_up.tokenizer.padded_tokens_and_mask(
+            tokens, options_up['text_ctx']
+        )
+        
+        # Create the model conditioning dict.
+        model_kwargs = dict(
+            # Low-res image to upsample.
+            low_res=((samples+1)*127.5).round()/127.5 - 1,
+            tokens=th.tensor(
+                [tokens] * batch_size, device=device
+            ),
+            mask=th.tensor(
+                [mask] * batch_size,
+                dtype=th.bool,
+                device=device,
+            ),
+            self_init = (self_emb)[:1],
+            self_emb = None,
+        )
+        # print("embeding:", embeding.requires_grad)
+        # model_up.del_cache()
+        up_shape = (batch_size, 3, options_up["image_size"], options_up["image_size"])
+        up_samples = diffusion_up.ddim_sample_loop(
+            model_up,
+            up_shape,
+            noise=th.randn(up_shape, device=device) * upsample_temp,
+            device=device,
+            clip_denoised=True,
+            progress=True,
+            model_kwargs=model_kwargs,
+            cond_fn=None,
+        )[:batch_size]
+        # model_up.del_cache()
+        up_samples.retain_grad()
+        print('up_samples',up_samples.grad)
+        
+        print("up_samples:", up_samples.requires_grad)
+        
+        path = 'output_image_256.png'
+        show_images(up_samples,path)
+        
+        # up_samples size :  torch.Size([1, 3, 256, 256])
+        # print("up_samples:", up_samples.requires_grad)
+        
+        ################ Clip Model ##############
+        # torch.Size([1, 3, 224, 224])
+        
+        up_samples_224 = F.interpolate(up_samples, size=(224, 224))
+        label_224 = F.interpolate(label, size=(224, 224))
 
-    h_adv = clip(up_samples_224)
-    h_harm = clip(label_224)
-    loss = criterion(h_adv, h_harm)
-    
-    # ----- model end ----
-    # loss = l2_loss(label, up_samples)
-    # Backpropagation
-    loss.backward()
-    # Update parameters
-    optimizer.step()
-    # lr = 0.1
-    # self_emb.data = self_emb.data + lr * self_emb.grad
-    print('self_emb',self_emb.grad)
-    # param_snapshots.append(get_parameters_snapshot(model))
-    # Print loss every 100 steps
-    # if step % 100 == 0:
-    print(f"Step {step}, Loss: {loss.item()}")
-    
+        h_adv = clip(up_samples_224)
+        h_harm = clip(label_224)
+        loss = criterion(h_adv, h_harm)
+        
+        # ----- model end ----
+        # loss = l2_loss(label, up_samples)
+        # Backpropagation
+        loss.backward()
+        # Update parameters
+        # optimizer.step()
+        lr = 0.1
+        self_emb.data = self_emb.data + lr * self_emb.grad
+        print('self_emb',self_emb.grad)
+        # param_snapshots.append(get_parameters_snapshot(model))
+        # Print loss every 100 steps
+        # if step % 100 == 0:
+        print(f"Step {step}, Loss: {loss.item()}")
+        
 # Save the optimized embedding
 # torch.save(s_wte.state_dict(), 'ck/optimized_s_wte.pt')
 '''

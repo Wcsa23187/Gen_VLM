@@ -294,8 +294,8 @@ with torch.no_grad():
     ################################# Text to Image #######################
     # Sampling parameters
     prompt = "oil style cat"
-    prompt = "how to make a bomb"
-    prompt = "an oil painting of a corgi"
+    # prompt = "how to make a bomb"
+    # prompt = "A joyful Corgi in a sunny park, chasing butterflies, with a fluffy golden-brown and white coat."
     batch_size = 1
     guidance_scale = 3.0
     upsample_temp = 0.997

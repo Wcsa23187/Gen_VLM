@@ -41,7 +41,7 @@ class Text2ImUNet(UNetModel):
         self.xf_ar = xf_ar
         self.xf_padding = xf_padding
         self.tokenizer = tokenizer
-
+        
         if not xf_width:
             super().__init__(*args, **kwargs, encoder_channels=None)
         else:
@@ -53,6 +53,7 @@ class Text2ImUNet(UNetModel):
                 xf_layers,
                 xf_heads,
             )
+            
             if xf_final_ln:
                 self.final_ln = LayerNorm(xf_width)
             else:
@@ -60,10 +61,14 @@ class Text2ImUNet(UNetModel):
 
             self.token_embedding = nn.Embedding(self.tokenizer.n_vocab, xf_width)
             
+            print(self.token_embedding.weight)
+            
             self.positional_embedding = nn.Parameter(th.empty(text_ctx, xf_width, dtype=th.float32))
+            
             self.transformer_proj = nn.Linear(xf_width, self.model_channels * 4)
 
             if self.xf_padding:
+                
                 self.padding_embedding = nn.Parameter(
                     th.empty(text_ctx, xf_width, dtype=th.float32)
                 )
@@ -89,7 +94,7 @@ class Text2ImUNet(UNetModel):
 
     def get_text_emb(self, tokens, mask,self_init):
         assert tokens is not None
-
+        
         if self.cache_text_emb and self.cache is not None:
             assert (
                 tokens == self.cache["tokens"]
@@ -98,11 +103,11 @@ class Text2ImUNet(UNetModel):
         # init self_init
         # print(tokens)
         # xf_in = self.token_embedding(tokens.long())
-        # torch.save(xf_in,'/home/changsheng/glide-text2im/ck/xf_in_tensor.pt')
+        # torch.save(xf_in,'/home/changsheng/glide-text2im/ck/xf_in_tensor_long.pt')
         xf_in = self_init
         # print(xf_in)
         # print(xf_in.shape)
-        # print(xf_in[:1,5:10,:])
+        print(xf_in[:1,5:10,:])
         # print("self_init:", self_init.requires_grad)
         # xf_in = self_init
         
@@ -115,14 +120,14 @@ class Text2ImUNet(UNetModel):
             xf_in = th.where(mask[..., None], xf_in, self.padding_embedding[None])
         
         # print("xf_in_1:", xf_in.requires_grad)
+        
         xf_out = self.transformer(xf_in.to(self.dtype))
         # print("xf_out_0:", xf_out.requires_grad)
         if self.final_ln is not None:
             xf_out = self.final_ln(xf_out)
         xf_proj = self.transformer_proj(xf_out[:, -1])
         xf_out = xf_out.permute(0, 2, 1)  # NLC -> NCL
-        # print("xf_proj:", xf_proj.requires_grad)
-        # print("xf_out:", xf_out.requires_grad)
+
         outputs = dict(xf_proj=xf_proj, xf_out=xf_out)
 
         if self.cache_text_emb:
@@ -137,7 +142,7 @@ class Text2ImUNet(UNetModel):
     def del_cache(self):
         self.cache = None
 
-    def forward(self, x, timesteps, tokens=None, mask=None, self_init = None,self_emb = None):
+    def forward(self, x, timesteps, tokens=None, mask=None, self_init = None,self_emb = None,text_outputs = None):
         hs = []
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
         
@@ -151,6 +156,10 @@ class Text2ImUNet(UNetModel):
         else:
             xf_out = None
         
+        '''
+        xf_proj, xf_out = text_outputs["xf_proj"], text_outputs["xf_out"]
+        emb = emb + xf_proj.to(emb)
+        '''
         # emb = self_emb
         
         # print("emb:", emb.requires_grad)
